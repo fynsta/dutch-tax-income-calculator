@@ -57,34 +57,73 @@
           <mat-checkbox color="primary" [formControl]="ruling"
             >30% ruling</mat-checkbox
           >
+          <mat-radio-group
+            aria-labelledby="ruling-details"
+            class="ruling-radio-group"
+            [formControl]="rulingChoice"
+            *ngIf="ruling.value"
+          >
+            <mat-radio-button
+              value="research"
+              aria-label="Working with scientific research"
+              title="Working with scientific research"
+              >Scientific research</mat-radio-button
+            >
+            <mat-radio-button
+              value="young"
+              aria-label="Employee with a master’s degree and younger than 30 years"
+              title="Employee with a master’s degree and younger than 30 years"
+              >Young employee with masters</mat-radio-button
+            >
+            <mat-radio-button
+              value="normal"
+              aria-label="None of the above"
+              title="None of the above"
+              >Other</mat-radio-button
+            >
+          </mat-radio-group>
+        </li>
+        <li>
+          <mat-checkbox color="primary" [formControl]="partialYear"
+            >Partial year (pro-rated)</mat-checkbox
+          >
+          <div
+            *ngIf="partialYear.value"
+            style="display: flex; gap: 8px; margin-top: 8px;"
+          >
+            <mat-form-field appearance="fill" style="width: 110px;">
+              <mat-label>Worked</mat-label>
+              <input
+                matInput
+                type="number"
+                inputmode="numeric"
+                [formControl]="workedDuration"
+                [errorStateMatcher]="errorMatcher"
+              />
+              <mat-error *ngIf="workedDuration.hasError('required')"
+                >Required</mat-error
+              >
+              <mat-error *ngIf="workedDuration.hasError('min')"
+                >Min 1</mat-error
+              >
+              <mat-error *ngIf="workedDuration.hasError('max')"
+                >Max {{ maxDuration }}</mat-error
+              >
+            </mat-form-field>
+
+            <mat-form-field appearance="fill" style="width: 120px;">
+              <mat-label>Period</mat-label>
+              <mat-select [formControl]="workedPeriod">
+                <mat-option
+                  *ngFor="let option of ['Weeks', 'Months']"
+                  [value]="option"
+                  >{{ option }}</mat-option
+                >
+              </mat-select>
+            </mat-form-field>
+          </div>
         </li>
       </ul>
-
-      <mat-radio-group
-        aria-labelledby="ruling-details"
-        class="ruling-radio-group"
-        [formControl]="rulingChoice"
-        *ngIf="ruling.value"
-      >
-        <mat-radio-button
-          value="research"
-          aria-label="Working with scientific research"
-          title="Working with scientific research"
-          >Scientific research</mat-radio-button
-        >
-        <mat-radio-button
-          value="young"
-          aria-label="Employee with a master’s degree and younger than 30 years"
-          title="Employee with a master’s degree and younger than 30 years"
-          >Young employee with masters</mat-radio-button
-        >
-        <mat-radio-button
-          value="normal"
-          aria-label="None of the above"
-          title="None of the above"
-          >Other</mat-radio-button
-        >
-      </mat-radio-group>
 
       <mat-form-field appearance="fill">
         <mat-label>Year</mat-label>

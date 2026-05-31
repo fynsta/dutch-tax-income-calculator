@@ -1,12 +1,29 @@
 import { Component, OnInit, AfterViewChecked, OnDestroy } from '@angular/core';
 import { trigger, transition, style, animate } from '@angular/animations';
-import { FormControl } from '@angular/forms';
+import { AbstractControl, FormControl, ValidationErrors, Validators } from '@angular/forms';
+import { ErrorStateMatcher } from '@angular/material/core';
 import { ActivatedRoute, Router } from '@angular/router';
 import { constants, SalaryPaycheck } from 'dutch-tax-income-calculator';
 import { fromEvent, interval, merge, Subject } from 'rxjs';
 import { debounceTime, filter, takeUntil } from 'rxjs/operators';
 import { CookieService } from 'ngx-cookie-service';
 import { SwUpdate } from '@angular/service-worker';
+
+/** Shows the error state as soon as the control is invalid, without waiting for blur. */
+class ImmediateErrorStateMatcher implements ErrorStateMatcher {
+  isErrorState(control: AbstractControl | null): boolean {
+    return !!control && control.invalid;
+  }
+}
+
+// Paycheck fields that are a per-period slice of a yearly total. For a partial year
+// these are rescaled from the full-year cadence to the worked cadence.
+const PERIOD_FIELDS = [
+  'grossMonth', 'grossWeek', 'grossDay', 'grossHour',
+  'payrollTaxMonth', 'socialTaxMonth', 'taxWithoutCreditMonth',
+  'generalCreditMonth', 'labourCreditMonth', 'taxCreditMonth',
+  'incomeTaxMonth', 'netMonth', 'netWeek', 'netDay', 'netHour',
+];
 
 @Component({
     selector: 'app-root',
@@ -78,6 +95,23 @@ export class AppComponent implements OnInit, AfterViewChecked, OnDestroy {
   allowance = new FormControl(false);
   holidayPayoutMay = new FormControl(false);
   older = new FormControl(false);
+  partialYear = new FormControl(false);
+  workedPeriod = new FormControl<'Weeks' | 'Months'>('Weeks');
+  workedDuration = new FormControl(10, {
+    validators: [Validators.required, Validators.min(1), this.maxDurationValidator()],
+  });
+  readonly workingWeeks = constants.workingWeeks;
+  readonly errorMatcher = new ImmediateErrorStateMatcher();
+
+  // Max worked duration: a full year of the selected period (52 weeks or 12 months).
+  get maxDuration(): number {
+    return this.workedPeriod.value === 'Months' ? 12 : this.workingWeeks;
+  }
+
+  private maxDurationValidator() {
+    return (control: AbstractControl): ValidationErrors | null =>
+      Number(control.value) > this.maxDuration ? { max: true } : null;
+  }
   paycheck!: any;
 
   extraOptions = [
@@ -267,8 +301,16 @@ export class AppComponent implements OnInit, AfterViewChecked, OnDestroy {
       queryParams['hoursAmount'] && this.hoursAmount.setValue(queryParams['hoursAmount']);
       queryParams['ruling'] && this.ruling.setValue(queryParams['ruling'] === 'true');
       queryParams['holidayPayoutMay'] && this.holidayPayoutMay.setValue(queryParams['holidayPayoutMay'] === 'true');
+      queryParams['partialYear'] && this.partialYear.setValue(queryParams['partialYear'] === 'true');
+      queryParams['workedDuration'] && this.workedDuration.setValue(Number(queryParams['workedDuration']));
+      queryParams['workedPeriod'] && this.workedPeriod.setValue(queryParams['workedPeriod']);
     });
 
+    // The valid range for "worked" depends on the period (max 52 weeks / 12 months),
+    // so re-run its validators whenever the period switches.
+    this.workedPeriod.valueChanges.subscribe(() => {
+      this.workedDuration.updateValueAndValidity({ emitEvent: false });
+    });
 
     merge(
       this.income.valueChanges,
@@ -279,7 +321,10 @@ export class AppComponent implements OnInit, AfterViewChecked, OnDestroy {
       this.holidayPayoutMay.valueChanges,
       this.hoursAmount.valueChanges,
       this.rulingChoice.valueChanges,
-      this.ruling.valueChanges
+      this.ruling.valueChanges,
+      this.partialYear.valueChanges,
+      this.workedDuration.valueChanges,
+      this.workedPeriod.valueChanges
     ).subscribe((_) => {
       this.updateRouter();
       this.recalculate();
@@ -361,6 +406,13 @@ export class AppComponent implements OnInit, AfterViewChecked, OnDestroy {
 
   recalculate(): void {
     this.calculationSubject.next();
+
+    const startFrom = this.startFrom.getRawValue()!;
+    const year = +(this.selectedYear.getRawValue() ?? constants.currentYear);
+    const ruling = {
+      checked: this.ruling.getRawValue() ?? false,
+      choice: this.rulingChoice.getRawValue() ?? 'normal',
+    } as any;
     const salary = {
       income: this.income.getRawValue() ?? 0,
       allowance: this.allowance.getRawValue() ?? false,
@@ -368,15 +420,33 @@ export class AppComponent implements OnInit, AfterViewChecked, OnDestroy {
       older: this.older.getRawValue() ?? false,
       hours: this.hoursAmount.getRawValue() ?? 0,
     };
-    this.paycheck = new SalaryPaycheck(
-      salary,
-      this.startFrom.getRawValue()!,
-      +(this.selectedYear.getRawValue() ?? constants.currentYear),
-      {
-        checked: this.ruling.getRawValue() ?? false,
-        choice: this.rulingChoice.getRawValue() ?? 'normal',
-      } as any
-    );
+
+    // Partial year: only employed part of the year, so pro-rate the income and the
+    // (annual) 30% ruling norm and cap. Skipped while the duration is invalid.
+    const partial = this.partialYear.getRawValue() ?? false;
+    const workedPeriod = this.workedPeriod.getRawValue() ?? 'Weeks';
+    const periodTotal = workedPeriod === 'Months' ? 12 : this.workingWeeks;
+    const workedDuration = Number(this.workedDuration.getRawValue());
+    const isPartial = partial && this.workedDuration.valid && workedDuration < periodTotal;
+    const fraction = isPartial ? workedDuration / periodTotal : 1;
+
+    if (isPartial) {
+      // Keep only the worked fraction of the annualised gross (the package rounds it).
+      const fullYear: any = new SalaryPaycheck(salary, startFrom, year, ruling);
+      const proRated = { ...salary, income: fullYear.inputGrossYear * fraction };
+      this.paycheck = this.proRatedPaycheck(proRated, year, ruling, fraction);
+
+      // Yearly fields hold the period total; rescale per-period values to the worked cadence.
+      const scale = 1 / fraction;
+      PERIOD_FIELDS.forEach((key) => (this.paycheck[key] *= scale));
+    } else {
+      this.paycheck = new SalaryPaycheck(salary, startFrom, year, ruling);
+    }
+
+    // fraction is 1 for a full year, so these reduce to the standard counts.
+    const monthsWorked = 12 * fraction;
+    const weeksCount = this.workingWeeks * fraction;
+    const daysCount = constants.workingDays * fraction;
 
     const mayPayout = this.holidayPayoutMay.getRawValue() && this.allowance.getRawValue();
     const netAllowance = this.paycheck.netAllowance || 0;
@@ -391,25 +461,44 @@ export class AppComponent implements OnInit, AfterViewChecked, OnDestroy {
           const netYearWithoutHoliday = this.paycheck.netYear - netAllowance;
           switch (option.name) {
             case 'netMonth':
-              value = netYearWithoutHoliday / 12;
+              value = netYearWithoutHoliday / monthsWorked;
               break;
             case 'netWeek':
-              value = netYearWithoutHoliday / 52;
+              value = netYearWithoutHoliday / weeksCount;
               break;
             case 'netDay':
-              value = netYearWithoutHoliday / 255;
+              value = netYearWithoutHoliday / daysCount;
               break;
             case 'netHour':
-              value = netYearWithoutHoliday / (52 * (this.hoursAmount.getRawValue() || 40));
+              value = netYearWithoutHoliday / (weeksCount * (this.hoursAmount.getRawValue() || 40));
               break;
           }
         }
 
         return { name: option.title, value };
       });
-    
+
 
     this.cellsWithOverflow.clear();
+  }
+
+  /**
+   * Build a paycheck with the 30% ruling salary norm and cap pro-rated to the worked
+   * period. The package reads both from the shared `constants` singleton and offers no
+   * override, so they are temporarily scaled and restored around the calculation.
+   */
+  private proRatedPaycheck(salary: any, year: number, ruling: any, fraction: number): any {
+    const C = constants as any;
+    const threshold = C.rulingThreshold[year][ruling.choice];
+    const cap = C.rulingMaxSalary[year];
+    try {
+      C.rulingThreshold[year][ruling.choice] = threshold * fraction;
+      C.rulingMaxSalary[year] = cap * fraction;
+      return new SalaryPaycheck(salary, 'Year', year, ruling);
+    } finally {
+      C.rulingThreshold[year][ruling.choice] = threshold;
+      C.rulingMaxSalary[year] = cap;
+    }
   }
 
 
@@ -474,6 +563,9 @@ export class AppComponent implements OnInit, AfterViewChecked, OnDestroy {
       hoursAmount: this.hoursAmount.getRawValue(),
       ruling: this.ruling.getRawValue(),
       holidayPayoutMay: this.holidayPayoutMay.getRawValue(),
+      partialYear: this.partialYear.getRawValue(),
+      workedDuration: this.workedDuration.getRawValue(),
+      workedPeriod: this.workedPeriod.getRawValue(),
     };
 
     // Map invalid values to null so Angular Router removes them from the URL.
